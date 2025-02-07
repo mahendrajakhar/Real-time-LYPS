@@ -53,6 +53,7 @@ class AudioHandler:
         self.p = None
         self.stream = None
         self.is_virtual = True
+        self._recording_started = False  # Add flag to track if we've logged start
         
     def start_recording(self):
         try:
@@ -65,7 +66,10 @@ class AudioHandler:
                     input=True,
                     frames_per_buffer=CHUNK
                 )
-            logging.info("Audio recording started (virtual mode)")
+            # Log only once when recording starts
+            if not self._recording_started:
+                logging.info("Audio recording started (virtual mode)")
+                self._recording_started = True
         except Exception as e:
             logging.error(f"Audio initialization error: {e}")
             self.is_virtual = True
@@ -76,6 +80,7 @@ class AudioHandler:
             self.stream.close()
         if self.p:
             self.p.terminate()
+        self._recording_started = False  # Reset flag when stopping
             
     def get_audio_data(self):
         if self.is_virtual:
