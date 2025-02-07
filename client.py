@@ -10,8 +10,22 @@ import os
 import asyncio
 import websockets
 from threading import Lock
+import logging
+
+# Configure logging to show only important messages
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%H:%M:%S'
+)
+
+# Suppress ALSA errors
+os.environ['ALSA_CARD'] = 'Dummy'  # Use dummy audio device
+logging.getLogger('alsa').setLevel(logging.ERROR)
 
 app = Flask(__name__)
+# Suppress Flask development server logs
+logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 # Global variables
 audio_queue = Queue()
@@ -33,11 +47,8 @@ class AudioHandler:
         
     def start_recording(self):
         try:
-            # List available devices
             info = self.p.get_host_api_info_by_index(0)
             numdevices = info.get('deviceCount')
-            
-            # Find input device
             input_device_index = None
             for i in range(numdevices):
                 if (self.p.get_device_info_by_host_api_device_index(0, i).get('maxInputChannels')) > 0:
@@ -45,8 +56,7 @@ class AudioHandler:
                     break
             
             if input_device_index is None:
-                print("No input devices found, using null device")
-                # Use null device configuration
+                logging.info("Using virtual audio device")
                 self.stream = self.p.open(
                     format=FORMAT,
                     channels=CHANNELS,
@@ -65,8 +75,7 @@ class AudioHandler:
                     input_device_index=input_device_index
                 )
         except OSError as e:
-            print(f"Error opening audio stream: {e}")
-            # Return dummy audio data
+            logging.error(f"Audio device error: {e}")
             self.stream = None
             
     def stop_recording(self):
@@ -143,20 +152,16 @@ def stop_stream():
     return "Stopped streaming"
 
 async def websocket_client():
-    """Handle WebSocket connection"""
     global current_websocket
     try:
         async with websockets.connect('ws://127.0.0.1:8765') as websocket:
             with websocket_lock:
                 current_websocket = websocket
-            print(f"Connected to server")
+            logging.info("WebSocket connected")
             
-            # Start response handler
             response_task = asyncio.create_task(
                 process_server_response(websocket, frame_queue)
             )
-            
-            # Start audio processing
             audio_task = asyncio.create_task(
                 process_audio_queue(websocket)
             )
@@ -164,69 +169,60 @@ async def websocket_client():
             try:
                 await asyncio.gather(response_task, audio_task)
             except Exception as e:
-                print(f"Error in websocket handling: {e}")
+                logging.error(f"WebSocket error: {e}")
             finally:
                 response_task.cancel()
                 audio_task.cancel()
     except Exception as e:
-        print(f"WebSocket connection error: {e}")
+        logging.error(f"Connection error: {e}")
     finally:
         with websocket_lock:
             current_websocket = None
 
 async def process_server_response(websocket, frame_queue):
-    """Handle video frames from server"""
     try:
         async for message in websocket:
             try:
-                # Decode video data
                 frame_data = np.frombuffer(message, dtype=np.uint8)
                 frame = cv2.imdecode(frame_data, cv2.IMREAD_COLOR)
                 
-                # Put frame in queue for display
                 if not frame_queue.full():
                     frame_queue.put(frame)
                     
-                # Save frame to video file
                 if hasattr(process_server_response, 'video_writer'):
                     process_server_response.video_writer.write(frame)
                 else:
-                    # Initialize video writer
                     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                     timestamp = time.strftime("%Y%m%d_%H%M%S")
-                    output_path = f'output_{timestamp}.mp4'
+                    output_path = f'outputs/output_{timestamp}.mp4'
                     process_server_response.video_writer = cv2.VideoWriter(
                         output_path, 
                         fourcc, 
-                        30.0, # FPS
+                        30.0,
                         (frame.shape[1], frame.shape[0])
                     )
-                    print(f"Started saving video to {output_path}")
-                    
+                    logging.info(f"Recording started: {output_path}")
             except Exception as e:
-                print(f"Error processing server response: {e}")
+                logging.error(f"Frame processing error: {e}")
     except Exception as e:
-        print(f"WebSocket receive error: {e}")
+        logging.error(f"Server response error: {e}")
     finally:
         if hasattr(process_server_response, 'video_writer'):
             process_server_response.video_writer.release()
+            logging.info("Recording stopped")
 
 async def process_audio_queue(websocket):
-    """Send audio data to server"""
     try:
         while True:
             if not audio_queue.empty():
                 audio_data = audio_queue.get()
                 await websocket.send(audio_data)
-                print("Sent audio chunk to server")
             else:
                 await asyncio.sleep(0.01)
     except Exception as e:
-        print(f"Error sending audio data: {e}")
+        logging.error(f"Audio processing error: {e}")
 
 if __name__ == '__main__':
-    # Create output directory
     os.makedirs('outputs', exist_ok=True)
-    
-    # Start Flask app
+    logging.info("Starting Real-time Lip Sync server...")
     app.run(host='0.0.0.0', port=5001, debug=False, threaded=True)
