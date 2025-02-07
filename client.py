@@ -82,23 +82,21 @@ class AudioHandler:
         return self.stream.read(CHUNK)
 
 def generate_frames():
-    # For demo, using a sample video file
-    # Replace this with your actual lip-sync video generation logic
-    video_path = "/Users/indianrenters/SadTalker/examples/ref_video/WDA_AlexandriaOcasioCortez_000.mp4"  # Update with your video path
-    cap = cv2.VideoCapture(video_path)
-    
     while True:
-        success, frame = cap.read()
-        if not success:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Loop video
-            continue
-            
-        # Convert frame to jpg format
-        ret, buffer = cv2.imencode('.jpg', frame)
-        frame = buffer.tobytes()
-        
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        if not frame_queue.empty():
+            frame = frame_queue.get()
+            ret, buffer = cv2.imencode('.jpg', frame)
+            frame = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        else:
+            # Return a blank frame if queue is empty
+            blank_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            ret, buffer = cv2.imencode('.jpg', blank_frame)
+            frame = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+            time.sleep(0.03)  # 30 FPS
 
 @app.route('/')
 def index():
@@ -127,6 +125,7 @@ def start_stream():
     global is_recording
     is_recording = True
     threading.Thread(target=start_audio_recording).start()
+    threading.Thread(target=lambda: asyncio.run(websocket_client())).start()
     return "Started streaming"
 
 @app.route('/stop_stream')
@@ -167,5 +166,59 @@ async def websocket_client():
         with websocket_lock:
             current_websocket = None
 
+async def process_server_response(websocket, frame_queue):
+    """Handle video frames from server"""
+    try:
+        async for message in websocket:
+            try:
+                # Decode video data
+                frame_data = np.frombuffer(message, dtype=np.uint8)
+                frame = cv2.imdecode(frame_data, cv2.IMREAD_COLOR)
+                
+                # Put frame in queue for display
+                if not frame_queue.full():
+                    frame_queue.put(frame)
+                    
+                # Save frame to video file
+                if hasattr(process_server_response, 'video_writer'):
+                    process_server_response.video_writer.write(frame)
+                else:
+                    # Initialize video writer
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    timestamp = time.strftime("%Y%m%d_%H%M%S")
+                    output_path = f'output_{timestamp}.mp4'
+                    process_server_response.video_writer = cv2.VideoWriter(
+                        output_path, 
+                        fourcc, 
+                        30.0, # FPS
+                        (frame.shape[1], frame.shape[0])
+                    )
+                    print(f"Started saving video to {output_path}")
+                    
+            except Exception as e:
+                print(f"Error processing server response: {e}")
+    except Exception as e:
+        print(f"WebSocket receive error: {e}")
+    finally:
+        if hasattr(process_server_response, 'video_writer'):
+            process_server_response.video_writer.release()
+
+async def process_audio_queue(websocket):
+    """Send audio data to server"""
+    try:
+        while True:
+            if not audio_queue.empty():
+                audio_data = audio_queue.get()
+                await websocket.send(audio_data)
+                print("Sent audio chunk to server")
+            else:
+                await asyncio.sleep(0.01)
+    except Exception as e:
+        print(f"Error sending audio data: {e}")
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    # Create output directory
+    os.makedirs('outputs', exist_ok=True)
+    
+    # Start Flask app
+    app.run(host='0.0.0.0', port=5001, debug=False, threaded=True)  # Set debug=False for WebSocket support
