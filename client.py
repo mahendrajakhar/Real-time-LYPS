@@ -153,31 +153,48 @@ def stop_stream():
 
 async def websocket_client():
     global current_websocket
-    try:
-        async with websockets.connect('ws://127.0.0.1:8765') as websocket:
+    retry_count = 0
+    max_retries = 3
+    
+    while retry_count < max_retries:
+        try:
+            async with websockets.connect(
+                'ws://127.0.0.1:8765',
+                ping_interval=None,  # Disable ping/pong
+                max_size=None  # No size limit for messages
+            ) as websocket:
+                with websocket_lock:
+                    current_websocket = websocket
+                logging.info("WebSocket connected")
+                
+                response_task = asyncio.create_task(
+                    process_server_response(websocket, frame_queue)
+                )
+                audio_task = asyncio.create_task(
+                    process_audio_queue(websocket)
+                )
+                
+                try:
+                    await asyncio.gather(response_task, audio_task)
+                except Exception as e:
+                    logging.error(f"WebSocket error: {e}")
+                finally:
+                    response_task.cancel()
+                    audio_task.cancel()
+                    
+                # If we get here without errors, break the retry loop
+                break
+                
+        except Exception as e:
+            retry_count += 1
+            if retry_count < max_retries:
+                logging.error(f"Connection error (attempt {retry_count}): {e}")
+                await asyncio.sleep(2)  # Wait before retrying
+            else:
+                logging.error(f"Failed to connect after {max_retries} attempts")
+        finally:
             with websocket_lock:
-                current_websocket = websocket
-            logging.info("WebSocket connected")
-            
-            response_task = asyncio.create_task(
-                process_server_response(websocket, frame_queue)
-            )
-            audio_task = asyncio.create_task(
-                process_audio_queue(websocket)
-            )
-            
-            try:
-                await asyncio.gather(response_task, audio_task)
-            except Exception as e:
-                logging.error(f"WebSocket error: {e}")
-            finally:
-                response_task.cancel()
-                audio_task.cancel()
-    except Exception as e:
-        logging.error(f"Connection error: {e}")
-    finally:
-        with websocket_lock:
-            current_websocket = None
+                current_websocket = None
 
 async def process_server_response(websocket, frame_queue):
     video_writer = None
