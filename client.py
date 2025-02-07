@@ -9,6 +9,7 @@ from queue import Queue
 import os
 import asyncio
 import websockets
+from threading import Lock
 
 app = Flask(__name__)
 
@@ -17,7 +18,7 @@ audio_queue = Queue()
 frame_queue = Queue(maxsize=10)
 is_recording = False
 current_websocket = None
-websocket_lock = asyncio.Lock()
+websocket_lock = Lock()
 
 # Audio recording configuration
 CHUNK = 1024
@@ -79,7 +80,7 @@ class AudioHandler:
             t = np.linspace(0, CHUNK/RATE, CHUNK)
             data = 0.5 * np.sin(2*np.pi*440*t)  # 440 Hz sine wave
             return data.astype(np.float32).tobytes()
-        return self.stream.read(CHUNK)
+        return self.stream.read(CHUNK, exception_on_overflow=False)
 
 def generate_frames():
     while True:
@@ -120,12 +121,19 @@ def start_audio_recording():
         
     audio_handler.stop_recording()
 
+def run_async_websocket():
+    """Run websocket client in a new event loop"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(websocket_client())
+    loop.close()
+
 @app.route('/start_stream')
 def start_stream():
     global is_recording
     is_recording = True
     threading.Thread(target=start_audio_recording).start()
-    threading.Thread(target=lambda: asyncio.run(websocket_client())).start()
+    threading.Thread(target=run_async_websocket).start()
     return "Started streaming"
 
 @app.route('/stop_stream')
@@ -221,4 +229,4 @@ if __name__ == '__main__':
     os.makedirs('outputs', exist_ok=True)
     
     # Start Flask app
-    app.run(host='0.0.0.0', port=5001, debug=False, threaded=True)  # Set debug=False for WebSocket support
+    app.run(host='0.0.0.0', port=5001, debug=False, threaded=True)
