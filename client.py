@@ -7,6 +7,8 @@ import wave
 import time
 from queue import Queue
 import os
+import asyncio
+import websockets
 
 app = Flask(__name__)
 
@@ -14,6 +16,8 @@ app = Flask(__name__)
 audio_queue = Queue()
 frame_queue = Queue(maxsize=10)
 is_recording = False
+current_websocket = None
+websocket_lock = asyncio.Lock()
 
 # Audio recording configuration
 CHUNK = 1024
@@ -96,6 +100,38 @@ def stop_stream():
     global is_recording
     is_recording = False
     return "Stopped streaming"
+
+async def websocket_client():
+    """Handle WebSocket connection"""
+    global current_websocket
+    try:
+        async with websockets.connect('ws://127.0.0.1:8765') as websocket:
+            with websocket_lock:
+                current_websocket = websocket
+            print(f"Connected to server")
+            
+            # Start response handler
+            response_task = asyncio.create_task(
+                process_server_response(websocket, frame_queue)
+            )
+            
+            # Start audio processing
+            audio_task = asyncio.create_task(
+                process_audio_queue(websocket)
+            )
+            
+            try:
+                await asyncio.gather(response_task, audio_task)
+            except Exception as e:
+                print(f"Error in websocket handling: {e}")
+            finally:
+                response_task.cancel()
+                audio_task.cancel()
+    except Exception as e:
+        print(f"WebSocket connection error: {e}")
+    finally:
+        with websocket_lock:
+            current_websocket = None
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001, debug=True)
